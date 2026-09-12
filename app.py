@@ -2,6 +2,11 @@ import os
 import numpy as np
 import cv2
 import tensorflow as tf
+
+# Keep TF from spinning up extra threads -- helps a lot on low-CPU / low-RAM
+# instances like Render's free tier.
+tf.config.threading.set_intra_op_parallelism_threads(1)
+tf.config.threading.set_inter_op_parallelism_threads(1)
 from tensorflow.keras.layers import (Conv2D, MaxPooling2D, BatchNormalization, Dropout, GlobalAveragePooling2D, Dense, Reshape, Multiply, Input, Add, Lambda, Concatenate, Activation, Rescaling)
 from tensorflow.keras.models import Model
 from flask import Flask, request, jsonify, render_template
@@ -82,10 +87,17 @@ def build_mt_net(input_shape=(IMG_SIZE, IMG_SIZE, 3), num_classes=NUM_CLASSES, d
 # --- Load Model ---
 print("Loading MT-Net Architecture and Weights...")
 model = build_mt_net()
-# ওয়েটস ফাইলের নাম আপনার সেভ করা নামের সাথে মিলিয়ে নিন
 model.load_weights("best_mt_net_stage2.weights.h5")
-# model.load_weights("best_mt_net_stage2_weights.h5")
 print("Model loaded successfully!")
+
+# Build the Grad-CAM sub-model ONCE at startup instead of on every request.
+# Re-creating this per-request duplicates part of the graph in memory each
+# time, which is wasteful on a low-RAM instance (e.g. Render free tier).
+_GRADCAM_LAYER_NAME = "res_output_relu_3"
+grad_model = tf.keras.models.Model(
+    [model.inputs],
+    [model.get_layer(_GRADCAM_LAYER_NAME).output, model.output]
+)
 
 # --- Web App Helpers ---
 ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "bmp", "tif", "tiff"}
@@ -108,8 +120,9 @@ def preprocess_image_for_web(image_bytes):
     final_img = cv2.resize(final_img, (IMG_SIZE, IMG_SIZE))
     return np.expand_dims(final_img, axis=0)
 
-def make_gradcam_heatmap(img_array, model, last_conv_layer_name="res_output_relu_3", pred_index=None):
-    grad_model = tf.keras.models.Model([model.inputs], [model.get_layer(last_conv_layer_name).output, model.output])
+def make_gradcam_heatmap(img_array, pred_index=None):
+    # Uses the module-level `grad_model` built once at startup (see above)
+    # instead of rebuilding it on every request.
     with tf.GradientTape() as tape:
         last_conv_layer_output, preds = grad_model(img_array)
         if pred_index is None: pred_index = tf.argmax(preds[0])
@@ -150,7 +163,7 @@ def predict():
         top_class_index = CLASS_NAMES.index(top_class_name)
         top_confidence = pred_results[0]['confidence']
 
-        heatmap = make_gradcam_heatmap(processed_img_array, model, pred_index=top_class_index)
+        heatmap = make_gradcam_heatmap(processed_img_array, pred_index=top_class_index)
 
         nparr = np.frombuffer(image_bytes, np.uint8)
         original_cv_img = cv2.resize(cv2.imdecode(nparr, cv2.IMREAD_COLOR), (IMG_SIZE, IMG_SIZE))
@@ -172,11 +185,7 @@ def predict():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# if __name__ == '__main__':
-#     print("Starting Localhost Server...")
-#     app.run(port=5000, debug=True)
-
-
 if __name__ == '__main__':
+    print("Starting Localhost Server...")
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
