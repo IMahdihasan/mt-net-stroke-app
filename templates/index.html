@@ -1,0 +1,247 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MT-Net: Stroke Classification</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .drag-over { border-color: #3b82f6; background-color: #eff6ff; }
+        .loader { border: 4px solid #f3f3f3; border-top: 4px solid #3b82f6; border-radius: 50%; width: 30px; height: 30px; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .zoomable { cursor: zoom-in; }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen font-sans text-gray-800">
+
+    <div class="max-w-5xl mx-auto py-10 px-4">
+        <!-- Header -->
+        <div class="text-center mb-10">
+            <h1 class="text-4xl font-bold text-blue-600 mb-2">MT-Net</h1>
+            <p class="text-gray-600">Automated Brain Stroke Classification from CT Scans</p>
+        </div>
+
+        <!-- Upload Section -->
+        <div class="bg-white rounded-lg shadow-md p-8 text-center border-2 border-dashed border-gray-300 transition-colors duration-300" id="drop-zone">
+            <input type="file" id="file-input" class="hidden" accept="image/png, image/jpeg">
+
+            <!-- Empty state: drag & drop prompt -->
+            <div id="upload-content">
+                <svg class="mx-auto h-12 w-12 text-gray-400 mb-4" stroke="currentColor" fill="none" viewBox="0 0 48 48" aria-hidden="true">
+                    <path d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8m-12 4h.02" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+                <p class="text-lg text-gray-600">Drag & drop a CT Scan here, or</p>
+                <button onclick="document.getElementById('file-input').click()" class="mt-4 px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition">Browse Files</button>
+                <p class="text-xs text-gray-400 mt-3">PNG or JPG, up to 10MB</p>
+            </div>
+
+            <!-- Preview state: image selected, waiting for user to confirm -->
+            <div id="preview-content" class="hidden">
+                <img id="preview-img" src="" alt="Selected scan preview" class="mx-auto max-h-72 rounded border mb-5">
+                <div class="flex items-center justify-center gap-3">
+                    <button onclick="analyzeSelected()" class="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition font-medium">Analyze Scan</button>
+                    <button onclick="resetApp()" class="px-6 py-2 bg-gray-200 text-gray-700 rounded-md hover:bg-gray-300 transition">Choose Different Image</button>
+                </div>
+            </div>
+
+            <div id="loading" class="hidden flex flex-col items-center justify-center py-6">
+                <div class="loader mb-4"></div>
+                <p class="text-blue-600 font-medium">Analyzing Scan with MT-Net...</p>
+            </div>
+        </div>
+
+        <!-- Results Section (Hidden by default) -->
+        <div id="results" class="hidden mt-8 bg-white rounded-lg shadow-md p-8">
+            <h2 class="text-2xl font-bold text-gray-800 mb-6 border-b pb-2">Diagnostic Results</h2>
+
+            <!-- Predictions -->
+            <div>
+                <h3 class="text-lg font-semibold mb-4 text-gray-700">Classification Confidence</h3>
+                <div id="bars-container" class="space-y-4">
+                    <!-- Bars will be injected here via JS -->
+                </div>
+                <p id="low-confidence-warning" class="hidden mt-3 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2">
+                    ⚠ The model isn't highly confident about this result. Consider reviewing the scan manually.
+                </p>
+            </div>
+
+            <!-- Images: heatmap shown large, original as a smaller reference -->
+            <div class="mt-8">
+                <div class="flex items-baseline justify-between mb-3">
+                    <h3 class="text-lg font-semibold text-gray-700">Grad-CAM XAI Localization</h3>
+                    <span class="text-xs text-gray-400">Click image to enlarge</span>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
+                    <div>
+                        <img id="img-original" src="" alt="Original CT scan" class="w-full aspect-square object-cover rounded border zoomable" onclick="openLightbox(this.src)">
+                        <p class="text-sm text-gray-500 mt-1 text-center">Original CT</p>
+                    </div>
+                    <div>
+                        <img id="img-heatmap" src="" alt="Grad-CAM heatmap overlay" class="w-full aspect-square object-cover rounded border zoomable" onclick="openLightbox(this.src)">
+                        <p class="text-sm text-gray-500 mt-1 text-center">Heatmap Overlay</p>
+                    </div>
+                </div>
+                <p id="xai-note" class="mt-4 text-sm text-gray-600 bg-gray-50 border border-gray-200 rounded px-4 py-3"></p>
+            </div>
+
+            <p class="mt-6 text-xs text-gray-400 text-center">
+                This tool is a thesis research prototype and is not a substitute for professional medical diagnosis.
+            </p>
+
+            <div class="mt-6 text-center">
+                <button onclick="resetApp()" class="px-6 py-2 bg-gray-200 text-gray-700 rounded-md hover:bg-gray-300 transition">Analyze Another Scan</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const dropZone = document.getElementById('drop-zone');
+        const fileInput = document.getElementById('file-input');
+        const uploadContent = document.getElementById('upload-content');
+        const previewContent = document.getElementById('preview-content');
+        const previewImg = document.getElementById('preview-img');
+        const loading = document.getElementById('loading');
+        const results = document.getElementById('results');
+
+        let selectedFile = null;
+
+        // Handle Drag & Drop
+        dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+        dropZone.addEventListener('dragleave', () => { dropZone.classList.remove('drag-over'); });
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault(); dropZone.classList.remove('drag-over');
+            if (e.dataTransfer.files.length) stageFile(e.dataTransfer.files[0]);
+        });
+
+        // Handle File Select
+        fileInput.addEventListener('change', function() {
+            if (this.files.length) stageFile(this.files[0]);
+        });
+
+        // Step 1: user picked a file -> show a preview, wait for confirmation
+        function stageFile(file) {
+            if (!file.type.startsWith('image/')) {
+                alert('Please choose an image file (PNG or JPG).');
+                return;
+            }
+            selectedFile = file;
+            previewImg.src = URL.createObjectURL(file);
+            uploadContent.classList.add('hidden');
+            previewContent.classList.remove('hidden');
+            loading.classList.add('hidden');
+            results.classList.add('hidden');
+        }
+
+        // Step 2: user clicks "Analyze Scan" -> actually call the backend
+        function analyzeSelected() {
+            if (!selectedFile) return;
+            previewContent.classList.add('hidden');
+            loading.classList.remove('hidden');
+
+            const formData = new FormData();
+            formData.append('file', selectedFile);
+
+            fetch('/predict', { method: 'POST', body: formData })
+            .then(response => response.json())
+            .then(data => {
+                loading.classList.add('hidden');
+                if (data.error) {
+                    alert("Error: " + data.error);
+                    previewContent.classList.remove('hidden');
+                    return;
+                }
+                showResults(data);
+            })
+            .catch(error => {
+                alert("Something went wrong!");
+                loading.classList.add('hidden');
+                previewContent.classList.remove('hidden');
+            });
+        }
+
+        function showResults(data) {
+            results.classList.remove('hidden');
+            document.getElementById('img-original').src = "data:image/jpeg;base64," + data.original_img;
+            document.getElementById('img-heatmap').src = "data:image/jpeg;base64," + data.gradcam_img;
+            document.getElementById('xai-note').textContent = data.note || '';
+
+            const warning = document.getElementById('low-confidence-warning');
+            warning.classList.toggle('hidden', !data.low_confidence);
+
+            const barsContainer = document.getElementById('bars-container');
+            barsContainer.innerHTML = '';
+
+            data.predictions.forEach((pred, index) => {
+                const isTop = index === 0;
+                const color = isTop ? 'bg-blue-500' : 'bg-gray-300';
+                const textWeight = isTop ? 'font-bold text-blue-700' : 'text-gray-600';
+
+                const html = `
+                    <div>
+                        <div class="flex justify-between mb-1">
+                            <span class="${textWeight}">${pred.class}</span>
+                            <span class="${textWeight}">${pred.confidence}%</span>
+                        </div>
+                        <div class="w-full bg-gray-200 rounded-full h-2.5">
+                            <div class="${color} h-2.5 rounded-full" style="width: ${pred.confidence}%"></div>
+                        </div>
+                    </div>`;
+                barsContainer.innerHTML += html;
+            });
+        }
+
+        let lightboxEl = null;
+
+        function openLightbox(src) {
+            closeLightbox(); // just in case one is already open
+
+            lightboxEl = document.createElement('div');
+            // Inline styles (not Tailwind classes) so this overlay can never be
+            // shrunk or mis-positioned by any ancestor's stacking context.
+            lightboxEl.style.cssText = `
+                position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+                background: rgba(0,0,0,0.85); z-index: 9999;
+                display: flex; align-items: center; justify-content: center;
+                padding: 24px; box-sizing: border-box; cursor: zoom-out;
+            `;
+
+            const img = document.createElement('img');
+            img.src = src;
+            img.alt = 'Enlarged view';
+            img.style.cssText = `
+                max-width: 90vw; max-height: 90vh; width: auto; height: auto;
+                object-fit: contain; border-radius: 8px;
+                box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+            `;
+
+            lightboxEl.appendChild(img);
+            lightboxEl.addEventListener('click', closeLightbox);
+            document.body.appendChild(lightboxEl);
+            document.body.style.overflow = 'hidden';
+            document.addEventListener('keydown', escCloseLightbox);
+        }
+
+        function escCloseLightbox(e) {
+            if (e.key === 'Escape') closeLightbox();
+        }
+
+        function closeLightbox() {
+            if (lightboxEl) {
+                lightboxEl.remove();
+                lightboxEl = null;
+                document.body.style.overflow = '';
+                document.removeEventListener('keydown', escCloseLightbox);
+            }
+        }
+
+        function resetApp() {
+            selectedFile = null;
+            results.classList.add('hidden');
+            previewContent.classList.add('hidden');
+            uploadContent.classList.remove('hidden');
+            fileInput.value = '';
+        }
+    </script>
+</body>
+</html>
